@@ -1,0 +1,89 @@
+#include <Wire.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <MPU6050.h>
+#include <math.h>
+
+// -------- Wi-Fi --------
+const char* ssid = "Luan";
+const char* password = "luanluanluan";
+
+// -------- Servidor --------
+WebServer server(80);
+
+// -------- Sensor MPU6050 --------
+MPU6050 mpu;
+
+// Variáveis de leitura
+int16_t ax, ay, az;
+int16_t gx, gy, gz;
+
+void handleRoot() {
+  mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+
+  // Converte aceleração de LSB para g (~16384 LSB/g para ±2g)
+  float ax_g = ax / 16384.0;
+  float ay_g = ay / 16384.0;
+  float az_g = az / 16384.0;
+
+  // Converte giroscópio de LSB para graus/segundo (~131 LSB/°/s para ±250°/s)
+  float gx_dps = gx / 131.0;
+  float gy_dps = gy / 131.0;
+  float gz_dps = gz / 131.0;
+
+  // Calcula inclinação (em graus)
+  float pitch = atan2(ay_g, sqrt(ax_g * ax_g + az_g * az_g)) * 180 / PI;
+  float roll  = atan2(-ax_g, az_g) * 180 / PI;
+
+  // Cria JSON
+  String json = "{";
+  json += "\"acelerometro\": {";
+  json += "\"x\": " + String(ax_g, 2) + ",";
+  json += "\"y\": " + String(ay_g, 2) + ",";
+  json += "\"z\": " + String(az_g, 2);
+  json += "},";
+  json += "\"giroscopio\": {";
+  json += "\"x\": " + String(gx_dps, 2) + ",";
+  json += "\"y\": " + String(gy_dps, 2) + ",";
+  json += "\"z\": " + String(gz_dps, 2);
+  json += "},";
+  json += "\"inclinacao\": {";
+  json += "\"pitch\": " + String(pitch, 2) + ",";
+  json += "\"roll\": " + String(roll, 2);
+  json += "}";
+  json += "}";
+
+  server.send(200, "application/json", json);
+}
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(21,22);
+
+  // Conectar ao Wi-Fi
+  WiFi.begin(ssid, password);
+  Serial.print("Conectando ao Wi-Fi...");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nConectado! IP: ");
+  Serial.println(WiFi.localIP());
+
+  // Inicializa MPU6050
+  Serial.println("Inicializando MPU6050...");
+  mpu.initialize();
+  if (!mpu.testConnection()) {
+    Serial.println("MPU6050 não conectado!");
+    while (1);
+  }
+
+  // Inicia servidor
+  server.on("/dados", handleRoot);
+  server.begin();
+  Serial.println("Servidor iniciado.");
+}
+
+void loop() {
+  server.handleClient();
+}
