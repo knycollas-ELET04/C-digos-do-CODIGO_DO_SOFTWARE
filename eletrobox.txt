@@ -1,0 +1,528 @@
+from vpython import *
+import requests
+from math import sqrt, sin, cos, pi
+from datetime import datetime
+
+# --- Configuração da cena ---
+scene.title = "ELETROBOX"
+scene.width = 1000
+scene.height = 550
+scene.background = color.black
+scene.autoscale = False
+scene.title = '''
+<h1 style="color: #97e4ff; font-size: 25px; font-family: Arial; text-align: center; margin-top: -30px;">
+    SCANBOX + ELETROMAP
+</h1>
+'''
+
+# Estilo
+css = """
+<style>
+  body {
+    background-color: black !important;
+    color: white !important;
+  }
+  button {
+    background-color: #001c30 !important;
+    color: #97e4ff !important;
+    border: none !important;
+    padding: 8px 12px !important;
+    font-size: 14px !important;
+    border-radius: 4px !important;
+    cursor: pointer !important;
+  }
+  button:hover {
+    background-color: #003147 !important;
+  }
+  input[type=text] {
+    background-color: #222 !important;
+    color: white !important;
+    border: 1px solid #555 !important;
+    padding: 4px 8px !important;
+    border-radius: 4px !important;
+  }
+  label, span {
+    color: white !important;
+  }
+</style>
+"""
+scene.append_to_caption(css + '\n')
+
+# --- Variáveis globais ---
+iniciado = False
+ja_iniciou_uma_vez = False
+pos_atual = vector(0, 0, 0)
+LIMIAR_MOVIMENTO = 0.05
+PASSO_FIXO = 0.5
+objetos_desenhados = []
+angulo_direcao = 0.0  # em radianos
+caixinhas = []
+comodos = []
+eletrodutos = []
+comodo_selecionado = None
+arrastando = False
+caixinha_selecionada = None
+objeto_selecionado = None
+lista_caixinhas = []
+drag_start_mouse_pos = None
+drag_start_caixinhas_pos = None
+dragging = False
+dragging_box = None
+
+# Container de entradas e botões (à esquerda)
+wtext(text="\n")
+nome_input = winput(prompt='Nome do cômodo: ', bind=lambda evt: None)
+largura_input = winput(prompt='Largura (m): ', bind=lambda evt: None)
+altura_input = winput(prompt='Altura (m): ', bind=lambda evt: None)
+comp_input = winput(prompt='Comprimento (m): ', bind=lambda evt: None)
+wtext(text=" ")
+
+button(text="CARREGAR SCANBOX", bind=lambda: carregar_dados())
+wtext(text=" ")
+button(text="GERAR", bind=lambda: gerar())
+wtext(text=" ")
+button(text="ROTACIONAR", bind=lambda: rotacionar_botao())
+wtext(text=" ")
+button(text="APAGAR", bind=lambda: apagar_selecionado())
+wtext(text=" ")
+button(text="CARREGAR ELETROMAP", bind=lambda: carregar_eletromap())
+wtext(text=" ")
+iniciar_botao = button(text="INICIAR", bind=lambda _: iniciar())
+wtext(text=" ")
+
+def iniciar():
+    global iniciado, pos_atual, ja_iniciou_uma_vez
+    if not ja_iniciou_uma_vez:
+        try:
+            altura_chao = float(altura2_input.text)
+            caixinha = box(pos=vector(0, altura_chao*100 + 0.7 / 2, 0), size=vector(5, 7, 5), color=color.green)
+            caixinhas.append(caixinha)  
+            objetos_desenhados.append(caixinha)
+            pos_atual = caixinha.pos
+            altura2_input.disabled = True
+            iniciar_botao.disabled = True
+            ja_iniciou_uma_vez = True
+        except:
+            print("Altura inválida.")
+            return
+    iniciado = True
+    iniciar_botao.disabled = True
+    altura2_input.disabled = True
+
+
+def parar():
+    global iniciado
+    iniciado = False
+    iniciar_botao.disabled = False
+    altura2_input.disabled = True
+
+scene.append_to_caption("")
+parar_botao = button(text="PARAR", bind=lambda _: parar())
+
+def reiniciar():
+    global iniciado, objetos_desenhados, ja_iniciou_uma_vez, pos_atual, angulo_direcao
+    for obj in objetos_desenhados:
+        obj.visible = False
+    objetos_desenhados = []
+    iniciado = False
+    ja_iniciou_uma_vez = False
+    pos_atual = vector(0, 0, 0)
+    angulo_direcao = 0.0
+    altura2_input.disabled = False
+    iniciar_botao.disabled = False
+
+scene.append_to_caption(" ")
+button(text="CENTRALIZAR", bind=lambda: centralizar_camera())
+wtext(text=" ")
+wtext(text="\n\n")
+
+scene.append_to_caption("IP eletromap: ")
+ip_eletromap_input = winput(text="192.168.148.113", width=150, bind=lambda evt: None)
+scene.append_to_caption("  ")
+
+wtext(text="IP scanbox= ")
+ip_scanbox_input = winput(text="192.168.148.239", width=150,bind=lambda evt: None) # campo de IP com valor padrão
+scene.append_to_caption(" ")
+scene.append_to_caption("Altura (cm): ")
+scene.append_to_caption(" ")
+altura2_input = winput(bind=lambda evt: None)
+scene.append_to_caption(" ")
+button(text="Baixar", bind=lambda _: baixar())
+scene.append_to_caption(" ")
+scene.append_to_caption("\n\nLista de cômodos:\n")
+lista_comodos_texto = wtext(text="")
+
+
+def gerar_caixinha():
+    global pos_atual, objetos_desenhados
+    caixinha = box(pos=pos_atual + vector(0, 0.35 / 2, 0), size=vector(0.5, 0.7, 0.5), color=color.white)
+    objetos_desenhados.append(caixinha)
+
+# --- Função principal de leitura e desenho ---
+def atualiza_desenho():
+    global pos_atual, objetos_desenhados, angulo_direcao
+
+    try:
+        ip = ip_eletromap_input.text.strip()
+        r = requests.get(f"http://{ip}/dados", timeout=1)
+        dados = r.json()
+
+        ax = float(dados["acelerometro"]["x"])
+        ay = float(dados["acelerometro"]["y"])
+        az = float(dados["acelerometro"]["z"])
+        pitch = float(dados["inclinacao"]["pitch"])
+        roll = float(dados["inclinacao"]["roll"])
+
+        modulo = sqrt(ax**2 + ay**2 + az**2)
+
+        if abs(modulo - 1) > LIMIAR_MOVIMENTO:
+            FATOR_CURVA = min(0.15, max(0.01, abs(roll) / 90))  # entre 0.01 e 0.15
+
+            angulo_direcao += (roll / 70.0) * (pi / 2) * FATOR_CURVA
+            pitch_rad = (pitch / 70.0) * (pi / 2)
+
+            deslocamento = vector(
+                PASSO_FIXO * cos(pitch_rad) * cos(angulo_direcao),
+                PASSO_FIXO * sin(pitch_rad),
+                PASSO_FIXO * cos(pitch_rad) * sin(angulo_direcao)
+            )
+
+            nova_pos = pos_atual + deslocamento
+            eletroduto = cylinder(pos=pos_atual, axis=deslocamento, radius=2.0, color=color.yellow)
+            objetos_desenhados.append(eletroduto)
+            pos_atual = nova_pos
+
+    except Exception as e:
+        print("Erro na requisição:", e)
+
+
+def carregar_dados():
+    try:
+        ip2 = ip_scanbox_input.text.strip()
+        if not ip2:
+            print("Por favor, insira um IP válido.")
+            return
+        url = f"http://{ip2}/"
+        response = requests.get(url, timeout=2)
+        if response.status_code == 200:
+            dados = response.json()
+            largura_input.text = str(round(dados.get("largura", 0) * 100))
+            altura_input.text = str(round(dados.get("altura", 0) * 100))
+            comp_input.text = str(round(dados.get("comprimento", 0) * 100))
+            print(f"Dados carregados com sucesso do servidor {ip2}.")
+        else:
+            print("Erro ao buscar dados. Código:", response.status_code)
+    except Exception as e:
+        print("Erro ao acessar o servidor:", e)
+
+def carregar_eletromap():
+    global criando_caixinha, caixinha_atual, ultima_posicao
+
+    ip2 = ip_scanbox_input.text.strip()
+    if not ip2:
+        print("Por favor, insira o IP do servidor Scanbox para obter a altura.")
+        return
+
+    try:
+        url = f"http://{ip2}"
+        response = requests.get(url, timeout=2)
+        if response.status_code == 200:
+            dados = response.json()
+            altura_cm = float(dados.get("altura", 0))
+            altura_m = altura_cm   # Convertendo para metros, se estiver em cm
+
+            # (Opcional) Preenche o campo de entrada com a altura, caso seja necessário
+            altura2_input.text = str(altura_m)
+
+            print(f"Caixinha inicial criada na altura de {altura_m:.2f} m.")
+        else:
+            print("Erro ao buscar dados do Scanbox:", response.status_code)
+    except Exception as e:
+        print("Erro ao acessar o servidor Scanbox:", e)
+
+def rotacionar_botao():
+    if comodo_selecionado:
+        rotacionar_selecionado()
+    elif caixinha_selecionada:
+        rotacionar_caixinha()
+    else:
+        print("Nenhum objeto selecionado para rotacionar.")
+
+def rotacionar_selecionado():
+    global comodo_selecionado
+    if comodo_selecionado:
+        for parte in comodo_selecionado.partes:
+            parte.rotate(angle=radians(45),axis=vector(0,1,0), origin=comodo_selecionado.center)
+        comodo_selecionado.rotulo.pos = comodo_selecionado.center + vector(0, comodo_selecionado.altura + 0.2, 0)
+    else:
+        print("Nenhum cômodo selecionado para rotacionar.")
+
+def rotacionar_caixinha():
+    global caixinha_selecionada
+    if caixinha_selecionada:
+        # Rotaciona 90 graus em Y (vertical)
+        caixinha_selecionada.rotate(angle=radians(45),axis=vector(0,1,0), origin=caixinha_selecionada.pos)
+        print("Caixinha rotacionada")
+    else:
+        print("Nenhuma caixinha selecionada para rotacionar.")
+
+# Função para apagar cômodo selecionado
+# Apagar cômodo selecionado
+
+
+# Apagar cômodo selecionado
+def apagar_selecionado():
+    global comodo_selecionado
+    if comodo_selecionado:
+        # Tornar invisíveis as partes do cômodo
+        for parte in comodo_selecionado.partes:
+            parte.visible = False
+            del parte  # opcional, só para liberar
+
+        # Remover o rótulo
+        comodo_selecionado.rotulo.visible = False
+        del comodo_selecionado.rotulo  # opcional
+
+        # Remover o cômodo da lista
+        if comodo_selecionado in comodos:
+            comodos.remove(comodo_selecionado)
+
+        comodo_selecionado = None
+        atualizar_lista_comodos()
+        print("Cômodo apagado.")
+    else:
+        reiniciar_cena(evt=None)
+        print("Selecione um cômodo clicando nele.")
+
+def apagar_comodo(evt=None):
+    global comodo_selecionado
+    if comodo_selecionado in comodos:
+        comodo_selecionado.visible = False
+        comodos.remove(objeto_selecionado)
+        comodo_selecionado = None
+        print("Cômodo apagado.")
+    else:
+        print("Nenhum cômodo selecionado ou objeto não é um cômodo.")
+
+# Função para reiniciar: apaga todas as caixinhas e eletrodutos
+
+def reiniciar_cena(evt):
+    for caixa in caixinhas:
+        caixa.visible = False
+        # Apaga os eletrodutos
+    for cilindros in eletrodutos:
+        cilindros.visible = False
+    caixinhas.clear()
+    eletrodutos.clear()
+    print("Caixinhas e eletrodutos apagados.")
+
+
+def selecionar_lista_comodos(evt):
+    global objeto_selecionado
+    linha = evt.selected
+    if linha is not None and linha < len(comodos):
+        objeto_selecionado = comodos[linha]
+        print(f"Cômodo selecionado: {objeto_selecionado.nome}")
+
+caixinha_selecionada = None
+selected_caixinha = None
+
+def selecionar_objeto(evt):
+    global objeto_selecionado
+    obj = scene.mouse.pick
+
+    if not obj:
+        return
+
+    for comodo in comodos:
+        if obj in comodo.partes:
+            objeto_selecionado = comodo
+            return
+
+    for caixa in caixinhas:
+        if obj == caixa:
+            objeto_selecionado = caixa
+            return
+
+    objeto_selecionado = None
+
+def centralizar_camera():
+    if not comodos:
+        return
+    centro_total = vector(0, 0, 0)
+    for comodo in comodos:
+        centro_total += comodo.center
+    scene.center = centro_total / len(comodos)
+
+# --- Interação mouse ---
+
+def mouse_down(evt):
+    global arrastando, comodo_selecionado, caixinha_selecionada
+    objeto = scene.mouse.pick
+    if objeto:
+        # Primeiro verifica cômodos
+        for comodo in comodos:
+            if objeto in comodo.partes:
+                comodo_selecionado = comodo
+                caixinha_selecionada = None
+                arrastando = True
+                return
+
+        # Depois verifica caixinhas
+        for caixa in caixinhas:
+            if objeto == caixa:
+                caixinha_selecionada = caixa
+                comodo_selecionado = None
+                arrastando = True
+                return
+
+def mouse_up(evt):
+    global arrastando
+    arrastando = False
+
+def mouse_move(evt):
+    global arrastando, comodo_selecionado, caixinha_selecionada
+    if arrastando:
+        destino = scene.mouse.project(normal=vector(0,1,0))
+        if destino:
+            if comodo_selecionado:
+                comodo_selecionado.mover_para(vector(destino.x, comodo_selecionado.center.y, destino.z))
+            elif caixinha_selecionada:
+                caixinha_selecionada.pos = vector(destino.x, caixinha_selecionada.pos.y, destino.z)
+
+scene.bind("mousemove", mouse_move)
+scene.bind("mousedown", mouse_down)
+scene.bind("mouseup", mouse_up)
+
+# --- Label info parede ---
+info_label = label(pos=vector(0,0,0), text='', visible=False, box=True, height=14,
+                   color=color.white, background=color.black, opacity=0.7)
+
+def mostrar_label_parede():
+    obj = scene.mouse.pick
+    if obj:
+        for c in comodos:
+            if obj in c.partes and obj.color == color.white:
+                sx, sy, sz = obj.size.x, obj.size.y, obj.size.z
+                largura = sx if sx > sz else sz
+                altura = sy
+                info_label.text = f"Tamanho: {largura:.2f}m x {altura:.2f}m"
+                pos_proj = scene.mouse.project(normal=vector(0,1,0))
+                if pos_proj:
+                    info_label.pos = pos_proj + vector(0, 1.5, 0)
+                info_label.visible = True
+                return
+    info_label.visible = False
+
+def gerar():
+    global pos_atual  # caso seja usada no código geral
+    nome = nome_input.text.strip()
+
+    try:
+        largura = float(largura_input.text)
+        altura = float(altura_input.text)
+        comprimento = float(comp_input.text)
+
+        if not nome:
+            print("Por favor, digite um nome para o cômodo.")
+            return
+
+        # Se ainda não iniciou, cria o cômodo
+        if not ja_iniciou_uma_vez:
+            pos = vector(0, 0, 0)
+            novo_comodo = Comodo(nome, largura, altura, comprimento, pos)
+            atualizar_lista_comodos()
+            return  # Termina aqui para não cair no código de criar caixinha
+
+        # Se já iniciou, cria nova caixinha verde no fim do último eletroduto
+        if objetos_desenhados:
+            ultimo = objetos_desenhados[-1]
+            if hasattr(ultimo, "axis"):  # é um eletroduto (cilindro)
+                fim = ultimo.pos + ultimo.axis
+            else:  # é uma caixinha
+                fim = ultimo.pos
+        else:
+            fim = pos_atual  # fallback
+
+        nova_caixinha = box(
+            pos=fim + vector(0, 2, 0),
+            size=vector(5, 7, 5),
+            color=color.green
+        )
+        caixinhas.append(nova_caixinha)
+        objetos_desenhados.append(nova_caixinha)
+        print("Nova caixinha criada.")
+    except ValueError:
+        print("Erro: largura, altura ou comprimento inválidos.")
+
+def atualizar_lista_comodos():
+    lista_comodos_texto.text = '\n'.join([
+        f"--{c.nome} (A={c.altura}cm, C={c.comprimento}cm, L={c.largura}cm)" for c in comodos
+    ]) if comodos else "Nenhum cômodo criado ainda."
+
+def mostrar_label_parede():
+    obj = scene.mouse.pick
+    if obj:
+        for c in comodos:
+            if obj in c.partes and obj.color == color.white:  # paredes brancas
+                sx, sy, sz = obj.size.x, obj.size.y, obj.size.z
+                largura = sx if sx > sz else sz
+                altura = sy
+
+                info_label.text = f"Tamanho: {largura:.2f}m x {altura:.2f}m"
+                pos_proj = scene.mouse.project(normal=vector(0,1,0))
+                if pos_proj:
+                    info_label.pos = pos_proj + vector(0, 1.5, 0)
+                info_label.visible = True
+                return
+    info_label.visible = False
+
+def baixar():
+    # Gira a câmera para visão aérea
+    scene.forward = vector(0, -1, 0)  # Câmera olhando de cima para baixo
+    scene.up = vector(0, 0, -1)       # Orientação "para cima" da câmera
+
+    rate(5)  # Dá tempo da câmera ajustar (pode ser ajustado)
+
+    # Define nome do arquivo com timestamp
+    nome_arquivo = f"Planta_baixa_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+
+    # Captura a imagem
+    scene.capture(nome_arquivo)
+    print(f"Imagem salva como {nome_arquivo}")
+
+class Comodo:
+    def __init__(self, nome, largura, altura, comprimento, pos):
+        self.nome = nome
+        self.largura = largura
+        self.altura = altura
+        self.comprimento = comprimento
+
+        esp = 5
+        x, y, z = pos.x, pos.y, pos.z
+
+        piso = box(pos=vector(x, y, z), size=vector(largura, esp, comprimento), color=color.gray(0.8))
+        parede1 = box(pos=vector(x, y + altura / 2, z - comprimento / 2), size=vector(largura, altura, esp), color=color.white, opacity=0.3)
+        parede2 = box(pos=vector(x, y + altura / 2, z + comprimento / 2), size=vector(largura, altura, esp), color=color.white, opacity=0.3)
+        parede3 = box(pos=vector(x - largura / 2, y + altura / 2, z), size=vector(esp, altura, comprimento), color=color.white, opacity=0.3)
+        parede4 = box(pos=vector(x + largura / 2, y + altura / 2, z), size=vector(esp, altura, comprimento), color=color.white, opacity=0.3)
+        rotulo = label(pos=vector(x, y + altura + 0.2, z), text=nome, height=15, box=False, color=color.white)
+
+        self.partes = [piso, parede1, parede2, parede3, parede4]
+        self.rotulo = rotulo
+        self.center = piso.pos
+        comodos.append(self)
+
+    def mover_para(self, destino):
+        deslocamento = destino - self.center
+        for parte in self.partes:
+            parte.pos += deslocamento
+        self.rotulo.pos += deslocamento
+        self.center = destino
+
+# --- Loop principal ---
+while True:
+    rate(10)
+    mostrar_label_parede()
+    if iniciado and ja_iniciou_uma_vez:
+        atualiza_desenho()
